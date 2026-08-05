@@ -1,0 +1,65 @@
+# reliefkit -- self-hosted terrain model generator.
+#
+#   docker compose up -d          then open http://127.0.0.1:8000
+#
+# Defaults here are deliberately locked down. The container runs unprivileged
+# with a read-only root filesystem and no Linux capabilities; it needs none of
+# them to serve HTTP and fetch elevation tiles.
+
+services:
+  reliefkit:
+    build:
+      context: .
+      args:
+        PYTHON_VERSION: "3.14"
+    image: ghcr.io/zfouts/reliefkit:latest
+    container_name: reliefkit
+
+    # Bound to loopback, not 0.0.0.0. There is no authentication in front of
+    # this, so publishing it to the network is an explicit decision -- change
+    # to "8000:8000" only if you mean it.
+    ports:
+      - "127.0.0.1:8000:8000"
+
+    user: "10001:10001"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+    # The only writable path. Python and GDAL both want scratch space, and
+    # exports are assembled in memory before being streamed out.
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=512m
+
+    # Reaps zombies and forwards signals so `docker compose stop` is clean.
+    init: true
+
+    restart: unless-stopped
+
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=4).status == 200 else 1)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+    # A 2000-sample export builds a ~400 MB mesh in memory before streaming.
+    # Raise this if you export at maximum detail; lower it for small models.
+    deploy:
+      resources:
+        limits:
+          memory: 4g
+        reservations:
+          memory: 512m
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

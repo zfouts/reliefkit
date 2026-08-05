@@ -1,0 +1,23 @@
+# Everything not needed to build the package. Keeps the build context small
+# and stops local state (venvs, caches, exported models) leaking into layers.
+.git
+.github
+.venv
+venv
+__pycache__
+*.py[cod]
+*.egg-info
+.pytest_cache
+.ruff_cache
+.mypy_cache
+build
+dist
+tests
+*.stl
+*.3mf
+*.tif
+*.tiff
+docker-compose.yml
+Dockerfile
+.dockerignore
+.gitignore

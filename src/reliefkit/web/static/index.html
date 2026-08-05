@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>reliefkit</title>
+<link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
+<link rel="stylesheet" href="/static/style.css">
+<script type="importmap">
+{"imports":{
+  "three":"https://unpkg.com/three@0.169.0/build/three.module.js",
+  "three/addons/":"https://unpkg.com/three@0.169.0/examples/jsm/"
+}}
+</script>
+<script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+</head>
+<body>
+
+<a class="skip-link" href="#workspace">Skip to workspace</a>
+
+<header class="topbar">
+  <h1>relief<span>kit</span></h1>
+  <p class="tagline">Printable terrain from public elevation data</p>
+  <output id="status" class="status" role="status" aria-live="polite"></output>
+</header>
+
+<div class="layout">
+
+  <!-- ─── settings ─────────────────────────────────────────────── -->
+  <aside class="sidebar" aria-label="Model settings">
+
+    <section class="panel">
+      <h2>Region</h2>
+      <div id="region-empty" class="empty">
+        <p><strong>No region selected.</strong></p>
+        <p>Hold <kbd>⌘</kbd> or <kbd>Ctrl</kbd> and drag on the map to draw one.</p>
+      </div>
+      <dl id="region-info" class="readout" hidden>
+        <div><dt>Ground size</dt><dd id="r-ground">—</dd></div>
+        <div><dt>Elevation</dt><dd id="r-elev">—</dd></div>
+        <div><dt>Centre</dt><dd id="r-centre">—</dd></div>
+      </dl>
+      <label class="check">
+        <input type="checkbox" id="square" checked>
+        <span>Constrain to square (1:1 ground aspect)</span>
+      </label>
+      <button type="button" id="clear" class="btn btn-ghost" disabled>Clear region</button>
+    </section>
+
+    <section class="panel">
+      <h2>Elevation source</h2>
+      <div class="field">
+        <label for="source">Source</label>
+        <select id="source">
+          <option value="auto">Auto — best available</option>
+          <option value="usgs3dep">USGS 3DEP — US, 1–30 m</option>
+          <option value="copernicus">Copernicus GLO-30 — global, 30 m</option>
+        </select>
+        <p class="hint" id="source-hint">Auto picks the highest resolution that covers your region.</p>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Scale</h2>
+      <div class="segmented" role="radiogroup" aria-label="Scale mode">
+        <button type="button" role="radio" aria-checked="true"  data-mode="fit"  class="on">Fit to size</button>
+        <button type="button" role="radio" aria-checked="false" data-mode="true">True scale</button>
+      </div>
+
+      <div id="mode-fit">
+        <div class="field">
+          <label for="size">Longest dimension</label>
+          <div class="input-unit">
+            <input type="number" id="size" value="100" min="10" max="2000" step="5">
+            <span class="unit">mm</span>
+          </div>
+        </div>
+        <div class="field">
+          <label for="relief">Relief height <output id="relief-out" class="tag">12 mm</output></label>
+          <input type="range" id="relief" value="12" min="2" max="60" step="1">
+          <p class="hint">Terrain height above the base.</p>
+        </div>
+      </div>
+
+      <div id="mode-true" hidden>
+        <div class="field">
+          <label for="denom">Cartographic scale</label>
+          <div class="input-unit">
+            <span class="unit unit-lead">1 :</span>
+            <input type="number" id="denom" value="100000" min="500" step="1000">
+          </div>
+        </div>
+        <div class="field">
+          <label for="exag">Vertical exaggeration <output id="exag-out" class="tag">2.0×</output></label>
+          <input type="range" id="exag" value="2" min="0.5" max="8" step="0.1">
+          <p class="hint">Real terrain is far wider than tall; 1.5–3× reads best.</p>
+        </div>
+      </div>
+
+      <div class="field">
+        <label for="base">Base thickness</label>
+        <div class="input-unit">
+          <input type="number" id="base" value="5" min="0" max="200" step="1">
+          <span class="unit">mm</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Export</h2>
+
+      <div class="field">
+        <label for="tool">Printer / cutter</label>
+        <select id="tool">
+          <option value="0.4" selected>FDM — 0.4 mm nozzle</option>
+          <option value="0.6">FDM — 0.6 mm nozzle</option>
+          <option value="0.8">FDM — 0.8 mm nozzle</option>
+          <option value="0.1">Resin — 0.1 mm</option>
+          <option value="1">CNC — 1 mm bit</option>
+          <option value="3">CNC — 3 mm ball mill</option>
+          <option value="6">CNC — 6 mm ball mill</option>
+          <option value="">Custom — set detail manually</option>
+        </select>
+        <p class="hint">Mesh detail follows this. Sampling finer than the tool adds file size, not detail.</p>
+      </div>
+
+      <div class="field">
+        <label for="grid">Mesh detail <output id="grid-out" class="tag">500 samples</output></label>
+        <input type="range" id="grid" value="500" min="40" max="2000" step="10">
+        <p class="hint" id="grid-note"></p>
+      </div>
+
+      <div class="field">
+        <span class="field-label" id="fmt-label">Format</span>
+        <div class="segmented" role="radiogroup" aria-labelledby="fmt-label">
+          <button type="button" role="radio" aria-checked="true"  data-fmt="3mf" class="on">3MF — smaller</button>
+          <button type="button" role="radio" aria-checked="false" data-fmt="stl">STL</button>
+        </div>
+      </div>
+
+      <dl class="readout">
+        <div><dt>Model size</dt><dd id="e-size">—</dd></div>
+        <div><dt>Scale</dt><dd id="e-scale">—</dd></div>
+        <div><dt>Triangles</dt><dd id="e-tris">—</dd></div>
+        <div><dt>File size</dt><dd id="e-bytes">—</dd></div>
+      </dl>
+      <div class="sticky-action">
+        <button type="button" id="export" class="btn btn-primary" disabled>
+          <span class="btn-label">Export 3MF</span>
+        </button>
+        <p class="hint" id="attribution"></p>
+      </div>
+    </section>
+  </aside>
+
+  <!-- ─── workspace ────────────────────────────────────────────── -->
+  <main class="workspace" id="workspace">
+    <div class="toolbar">
+      <div class="segmented" role="tablist" aria-label="View">
+        <button type="button" role="tab" aria-selected="true"  id="tab-map" class="on">Map</button>
+        <button type="button" role="tab" aria-selected="false" id="tab-3d" disabled title="Select a region first">3D preview</button>
+      </div>
+      <div class="segmented segmented-sm" role="radiogroup" aria-label="Basemap">
+        <button type="button" role="radio" aria-checked="true"  data-base="topo" class="on">Topo</button>
+        <button type="button" role="radio" aria-checked="false" data-base="satellite">Satellite</button>
+      </div>
+    </div>
+
+    <div class="stage">
+      <div id="map" class="view" role="application" aria-label="Region selection map"></div>
+
+      <div id="three" class="view" hidden>
+        <div id="three-empty" class="overlay-msg">
+          <p>Select a region to see it in 3D.</p>
+        </div>
+      </div>
+
+      <div id="busy" class="overlay-busy" hidden>
+        <div class="spinner" aria-hidden="true"></div>
+        <p id="busy-text">Fetching elevation…</p>
+      </div>
+
+      <div id="error" class="overlay-msg overlay-error" hidden>
+        <h3 id="error-title">Couldn’t load that region</h3>
+        <p id="error-text"></p>
+        <button type="button" id="retry" class="btn btn-ghost">Try again</button>
+      </div>
+
+      <p class="map-hint" id="map-hint">
+        Hold <kbd>⌘</kbd>/<kbd>Ctrl</kbd> and drag to select
+      </p>
+    </div>
+  </main>
+</div>
+
+<script type="module" src="/static/app.js"></script>
+</body>
+</html>

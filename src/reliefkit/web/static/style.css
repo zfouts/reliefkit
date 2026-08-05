@@ -1,0 +1,391 @@
+/* reliefkit — design tokens first, then components. Every spacing value comes
+   from the 4px scale; every colour from the ramp below. */
+
+:root {
+  --s1: 4px;  --s2: 8px;  --s3: 12px; --s4: 16px;
+  --s5: 24px; --s6: 32px; --s7: 48px;
+
+  --fs-xs: 12px; --fs-sm: 13px; --fs-md: 14px;
+  --fs-lg: 16px; --fs-xl: 20px;
+
+  --radius: 6px;
+  --radius-lg: 10px;
+  --sidebar: 336px;
+
+  --bg:        #f7f7f5;
+  --surface:   #ffffff;
+  --surface-2: #f0f0ed;
+  --border:    #dedcd7;
+  --border-strong: #c4c1ba;
+  --text:      #1b1b19;
+  --muted:     #67655f;
+  --primary:   #0f6f66;
+  --primary-hover: #0b574f;
+  --on-primary: #ffffff;
+  --danger:    #a3341f;
+  --danger-bg: #fdf0ec;
+  --warn:      #7a5300;
+  --focus:     #0f6f66;
+  --shadow: 0 1px 2px rgba(0,0,0,.05), 0 4px 12px rgba(0,0,0,.05);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg:        #131417;
+    --surface:   #1c1e22;
+    --surface-2: #24262b;
+    --border:    #33363d;
+    --border-strong: #474b54;
+    --text:      #e8eaec;
+    --muted:     #9ca1a9;
+    --primary:   #35b3a4;
+    --primary-hover: #47c7b7;
+    --on-primary: #07231f;
+    --danger:    #f08a70;
+    --danger-bg: #2c1a16;
+    --warn:      #d8a94a;
+    --focus:     #35b3a4;
+    --shadow: 0 1px 2px rgba(0,0,0,.4), 0 4px 14px rgba(0,0,0,.3);
+  }
+}
+
+* { box-sizing: border-box; }
+
+/* Components below set display: flex/grid, which outranks the [hidden]
+   attribute's UA default. Without this, anything toggled via .hidden stays
+   on screen. */
+[hidden] { display: none !important; }
+
+body {
+  margin: 0;
+  font: var(--fs-md)/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  color: var(--text);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+}
+
+h1, h2, h3 { margin: 0; line-height: 1.2; }
+
+kbd {
+  font: 500 var(--fs-xs)/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  padding: 3px 5px;
+  border: 1px solid var(--border-strong);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  background: var(--surface-2);
+  white-space: nowrap;
+}
+
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+.skip-link {
+  position: absolute; left: var(--s3); top: -48px;
+  padding: var(--s2) var(--s3); z-index: 100;
+  background: var(--primary); color: var(--on-primary);
+  border-radius: var(--radius); text-decoration: none;
+  transition: top .15s ease-out;
+}
+.skip-link:focus { top: var(--s3); }
+
+/* ── topbar ─────────────────────────────────────────────────── */
+
+.topbar {
+  display: flex; align-items: baseline; gap: var(--s3);
+  padding: var(--s3) var(--s4);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+.topbar h1 {
+  font-size: var(--fs-xl); font-weight: 600; letter-spacing: -.02em;
+}
+.topbar h1 span { color: var(--primary); }
+.tagline { margin: 0; color: var(--muted); font-size: var(--fs-sm); }
+
+.status {
+  margin-left: auto; font-size: var(--fs-sm); color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── layout ─────────────────────────────────────────────────── */
+
+.layout {
+  display: grid;
+  grid-template-columns: var(--sidebar) minmax(0, 1fr);
+  height: calc(100vh - 53px);
+}
+
+.sidebar {
+  overflow-y: auto;
+  border-right: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.panel {
+  padding: var(--s4);
+  border-bottom: 1px solid var(--border);
+}
+.panel:last-child { border-bottom: none; padding-bottom: 0; }
+
+/* The export button is the primary action; keep it reachable without
+   scrolling the sidebar to the end. */
+.sticky-action {
+  position: sticky; bottom: 0;
+  margin: var(--s4) calc(-1 * var(--s4)) 0;
+  padding: var(--s3) var(--s4);
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+}
+.sticky-action .hint { margin-top: var(--s2); }
+.panel h2 {
+  font-size: var(--fs-xs); font-weight: 600;
+  text-transform: uppercase; letter-spacing: .07em;
+  color: var(--muted);
+  margin-bottom: var(--s3);
+}
+
+/* ── fields ─────────────────────────────────────────────────── */
+
+.field { margin-bottom: var(--s4); }
+.field:last-child { margin-bottom: 0; }
+
+.field label, .field-label {
+  display: flex; align-items: center; gap: var(--s2);
+  font-size: var(--fs-sm); font-weight: 500;
+  margin-bottom: var(--s2);
+}
+
+/* Resolution note under the mesh-detail slider: neutral when the mesh matches
+   the tool, amber when it is finer than the tool can reproduce. */
+.hint.over { color: var(--warn); font-weight: 500; }
+
+.hint {
+  margin: var(--s2) 0 0;
+  font-size: var(--fs-xs); color: var(--muted);
+  max-width: 60ch;
+}
+
+.tag {
+  margin-left: auto;
+  font: 500 var(--fs-xs)/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  padding: 3px var(--s2);
+  border-radius: 4px;
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+input[type="number"], select {
+  width: 100%;
+  padding: var(--s2) var(--s3);
+  min-height: 38px;
+  font: inherit; font-size: var(--fs-md);
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+}
+input[type="number"]:hover, select:hover { border-color: var(--muted); }
+
+.input-unit { display: flex; align-items: stretch; }
+.input-unit input { border-radius: var(--radius) 0 0 var(--radius); }
+.unit {
+  display: flex; align-items: center;
+  padding: 0 var(--s3);
+  font-size: var(--fs-sm); color: var(--muted);
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong); border-left: none;
+  border-radius: 0 var(--radius) var(--radius) 0;
+}
+.unit-lead {
+  border-left: 1px solid var(--border-strong); border-right: none;
+  border-radius: var(--radius) 0 0 var(--radius);
+}
+.input-unit .unit-lead + input { border-radius: 0 var(--radius) var(--radius) 0; }
+
+input[type="range"] {
+  width: 100%; height: 24px; margin: 0;
+  accent-color: var(--primary);
+}
+
+.check {
+  display: flex; align-items: flex-start; gap: var(--s2);
+  font-size: var(--fs-sm); cursor: pointer;
+  margin-bottom: var(--s3);
+  min-height: 24px;
+}
+.check input { margin: 3px 0 0; accent-color: var(--primary); flex-shrink: 0; }
+
+/* ── segmented control ──────────────────────────────────────── */
+
+.segmented {
+  display: flex; gap: 2px; padding: 2px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin-bottom: var(--s4);
+}
+.segmented button {
+  flex: 1; padding: var(--s2) var(--s3); min-height: 34px;
+  font: inherit; font-size: var(--fs-sm); font-weight: 500;
+  color: var(--muted); background: none;
+  border: none; border-radius: 4px; cursor: pointer;
+  transition: background .15s ease-out, color .15s ease-out;
+}
+.segmented button:hover:not(:disabled):not(.on) { color: var(--text); }
+.segmented button.on {
+  background: var(--surface); color: var(--text);
+  box-shadow: 0 1px 2px rgba(0,0,0,.08);
+}
+.segmented button:disabled { opacity: .45; cursor: not-allowed; }
+.segmented-sm { margin: 0; }
+.segmented-sm button { min-height: 28px; font-size: var(--fs-xs); }
+
+/* ── buttons ────────────────────────────────────────────────── */
+
+.btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  gap: var(--s2);
+  width: 100%; min-height: 44px;
+  padding: var(--s2) var(--s4);
+  font: inherit; font-size: var(--fs-md); font-weight: 500;
+  border-radius: var(--radius); border: 1px solid transparent;
+  cursor: pointer;
+  transition: background .15s ease-out, border-color .15s ease-out;
+}
+.btn-primary { background: var(--primary); color: var(--on-primary); }
+.btn-primary:hover:not(:disabled) { background: var(--primary-hover); }
+.btn-ghost {
+  background: var(--surface); color: var(--text);
+  border-color: var(--border-strong);
+}
+.btn-ghost:hover:not(:disabled) { background: var(--surface-2); }
+.btn:disabled { opacity: .45; cursor: not-allowed; }
+.btn.working { pointer-events: none; }
+.btn.working .btn-label::after {
+  content: ""; display: inline-block;
+  width: 13px; height: 13px; margin-left: var(--s2);
+  vertical-align: -2px;
+  border: 2px solid currentColor; border-right-color: transparent;
+  border-radius: 50%;
+  animation: spin .7s linear infinite;
+}
+
+/* ── readouts ───────────────────────────────────────────────── */
+
+.readout { margin: 0 0 var(--s3); display: grid; gap: var(--s2); }
+.readout div { display: flex; justify-content: space-between; gap: var(--s3); }
+.readout dt { font-size: var(--fs-sm); color: var(--muted); }
+.readout dd {
+  margin: 0; text-align: right;
+  font: 500 var(--fs-sm)/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+.empty {
+  padding: var(--s3);
+  margin-bottom: var(--s3);
+  background: var(--surface-2);
+  border-radius: var(--radius);
+  font-size: var(--fs-sm);
+}
+.empty p { margin: 0 0 var(--s1); }
+.empty p:last-child { margin: 0; color: var(--muted); }
+
+/* ── workspace ──────────────────────────────────────────────── */
+
+.workspace { display: flex; flex-direction: column; min-width: 0; }
+
+.toolbar {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: var(--s3);
+  padding: var(--s2) var(--s4);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+.toolbar .segmented { margin: 0; }
+.toolbar > .segmented:first-child { min-width: 220px; }
+
+.stage { position: relative; flex: 1; min-height: 0; }
+.view { position: absolute; inset: 0; }
+#three { background: var(--surface-2); }
+
+.map-hint {
+  position: absolute; left: var(--s4); bottom: var(--s4);
+  margin: 0; padding: var(--s2) var(--s3);
+  font-size: var(--fs-xs); color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  pointer-events: none;
+}
+
+.overlay-msg, .overlay-busy {
+  position: absolute; inset: 0; z-index: 5;
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  gap: var(--s3); padding: var(--s5);
+  text-align: center;
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  backdrop-filter: blur(2px);
+}
+.overlay-msg p { margin: 0; max-width: 46ch; color: var(--muted); }
+.overlay-msg h3 { font-size: var(--fs-lg); font-weight: 600; }
+.overlay-msg .btn { width: auto; min-width: 140px; }
+.overlay-error { background: color-mix(in srgb, var(--danger-bg) 94%, transparent); }
+.overlay-error h3 { color: var(--danger); }
+
+.spinner {
+  width: 28px; height: 28px;
+  border: 3px solid var(--border-strong);
+  border-top-color: var(--primary);
+  border-radius: 50%;
+  animation: spin .8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.warn-list {
+  position: absolute; right: var(--s4); bottom: var(--s4);
+  max-width: 320px; margin: 0; padding: var(--s3);
+  list-style: none;
+  font-size: var(--fs-xs); color: var(--warn);
+  background: var(--surface);
+  border: 1px solid var(--border); border-left: 3px solid var(--warn);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+.warn-list li + li { margin-top: var(--s1); }
+
+/* MapLibre overrides so the selection box reads clearly. */
+.maplibregl-ctrl-attrib { font-size: 10px; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+  }
+}
+
+/* ── narrow viewports ───────────────────────────────────────── */
+
+@media (max-width: 860px) {
+  .layout { grid-template-columns: 1fr; height: auto; }
+  /* Selecting a region is the job; don't bury the map under the settings. */
+  .workspace { order: -1; }
+  .sidebar { border-right: none; }
+  .workspace { border-bottom: 1px solid var(--border); }
+  /* flex: 1 1 0% collapses to nothing once the workspace has auto height,
+     so pin the basis rather than relying on the declared height. */
+  .stage { flex: 0 0 60vh; height: 60vh; }
+  /* The sidebar is not its own scroll container here, so sticky would float
+     the button over the settings instead of pinning it. */
+  .sticky-action { position: static; margin-top: var(--s4); }
+  .topbar { flex-wrap: wrap; }
+  .status { margin-left: 0; width: 100%; }
+  .toolbar { flex-wrap: wrap; }
+  .toolbar > .segmented:first-child { min-width: 0; flex: 1 1 100%; }
+}

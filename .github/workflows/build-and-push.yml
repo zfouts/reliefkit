@@ -1,0 +1,160 @@
+name: build-and-push
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  PYTHON_VERSION: "3.14"
+
+# A newer push to the same ref makes the in-flight run redundant. Tags are
+# excluded so a release build is never cancelled by a follow-up commit.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  test:
+    name: test (python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.14"]   # floor declared in pyproject, and the image version
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+
+      - name: Install
+        run: pip install -e ".[dev,web]"
+
+      - name: Test
+        # Network-marked tests are excluded by default; CI should not fail
+        # because a public elevation service is having a bad day.
+        run: pytest -q
+
+  build:
+    name: build and push
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # Only needed for the arm64 leg. The image installs prebuilt manylinux
+      # wheels rather than compiling, so emulation stays cheap.
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ${{ env.REGISTRY }}
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive tags and labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,format=long
+            type=raw,value=latest,enable={{is_default_branch}}
+          labels: |
+            org.opencontainers.image.title=reliefkit
+            org.opencontainers.image.description=Printable 3D terrain models from public-domain elevation data
+            org.opencontainers.image.licenses=MIT
+
+      - name: Build and push
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          # Pull requests build both architectures to prove they still compile,
+          # but publish nothing -- a fork PR must not be able to push an image.
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: PYTHON_VERSION=${{ env.PYTHON_VERSION }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: mode=max
+          sbom: true
+
+      - name: Smoke test the image
+        # Runs the amd64 image the way compose does -- unprivileged, read-only
+        # root -- and proves it actually serves. A container that builds but
+        # dies on import is the failure mode this catches.
+        if: github.event_name != 'pull_request'
+        run: |
+          IMAGE="${REGISTRY}/${IMAGE_NAME}:sha-${GITHUB_SHA}"
+          docker run -d --name smoke \
+            --user 10001:10001 --read-only --cap-drop ALL \
+            --security-opt no-new-privileges:true \
+            --tmpfs /tmp:rw,noexec,nosuid,size=256m \
+            -p 8000:8000 "${IMAGE}"
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8000/api/health >/dev/null 2>&1; then
+              echo "healthy after ${i}s"
+              curl -fsS http://127.0.0.1:8000/api/health
+              docker rm -f smoke >/dev/null
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::container never became healthy"
+          docker logs smoke
+          exit 1
+        env:
+          REGISTRY: ${{ env.REGISTRY }}
+          IMAGE_NAME: ${{ env.IMAGE_NAME }}
+
+      # GitHub's attestation API rejects user-owned private repositories
+      # outright ("Feature not available for user-owned private repositories"),
+      # which fails the job even though the image published fine. Gated on
+      # visibility so it starts working by itself if the repo is made public.
+      #
+      # This is separate from, and additional to, the SLSA provenance and SBOM
+      # that buildx already attaches to the image above -- those work either
+      # way, so the published image is never unattested.
+      - name: Attest provenance
+        if: >-
+          github.event_name != 'pull_request' &&
+          github.event.repository.visibility == 'public'
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+      - name: Note skipped attestation
+        if: >-
+          github.event_name != 'pull_request' &&
+          github.event.repository.visibility != 'public'
+        run: |
+          echo "::notice::GitHub attestation skipped -- unavailable for user-owned private repositories. \
+          The image still carries buildx SLSA provenance and an SBOM. Make the repository public to enable it."
