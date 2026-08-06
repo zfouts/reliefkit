@@ -55,6 +55,22 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # A release must ship the version it claims. The image tag comes from the
+      # git tag while /api/health reports the packaged version, so if the two
+      # disagree the published image misreports itself and the health endpoint
+      # is useless for verifying what is deployed. Fail before building rather
+      # than discovering it in production.
+      - name: Check the tag matches the packaged version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          packaged=$(python3 -c 'import tomllib, pathlib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')
+          tagged="${GITHUB_REF_NAME#v}"
+          if [ "$packaged" != "$tagged" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} would publish an image reporting version ${packaged}. Bump pyproject.toml to ${tagged} and re-tag."
+            exit 1
+          fi
+          echo "tag ${GITHUB_REF_NAME} matches packaged version ${packaged}"
+
       # Only needed for the arm64 leg. The image installs prebuilt manylinux
       # wheels rather than compiling, so emulation stays cheap.
       - uses: docker/setup-qemu-action@v4
@@ -109,6 +125,11 @@ jobs:
         # Runs the amd64 image the way compose does -- unprivileged, read-only
         # root -- and proves it actually serves. A container that builds but
         # dies on import is the failure mode this catches.
+        #
+        # On a tag build it also reads the version back out of the running
+        # container. The step above compares two files; this compares the tag
+        # against what the shipped artefact actually says about itself, which
+        # is the claim anyone verifying a deploy will rely on.
         if: github.event_name != 'pull_request'
         run: |
           IMAGE="${REGISTRY}/${IMAGE_NAME}:sha-${GITHUB_SHA}"
@@ -118,10 +139,19 @@ jobs:
             --tmpfs /tmp:rw,noexec,nosuid,size=256m \
             -p 8000:8000 "${IMAGE}"
           for i in $(seq 1 30); do
-            if curl -fsS http://127.0.0.1:8000/api/health >/dev/null 2>&1; then
-              echo "healthy after ${i}s"
-              curl -fsS http://127.0.0.1:8000/api/health
+            if body=$(curl -fsS http://127.0.0.1:8000/api/health 2>/dev/null); then
+              echo "healthy after ${i}s: ${body}"
               docker rm -f smoke >/dev/null
+
+              expected="${EXPECT_VERSION#v}"
+              if [ -n "${expected}" ]; then
+                reported=$(printf '%s' "${body}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])')
+                if [ "${reported}" != "${expected}" ]; then
+                  echo "::error::image built for ${EXPECT_VERSION} reports version ${reported} on /api/health"
+                  exit 1
+                fi
+                echo "/api/health reports ${reported}, matching ${EXPECT_VERSION}"
+              fi
               exit 0
             fi
             sleep 1
@@ -132,6 +162,8 @@ jobs:
         env:
           REGISTRY: ${{ env.REGISTRY }}
           IMAGE_NAME: ${{ env.IMAGE_NAME }}
+          # Empty on branch builds, which have no version to check against.
+          EXPECT_VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
 
       # GitHub's attestation API rejects user-owned private repositories
       # outright ("Feature not available for user-owned private repositories"),

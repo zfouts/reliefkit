@@ -67,6 +67,16 @@ def test_health_reports_ok_without_touching_upstreams(client):
     assert body["version"]
 
 
+def test_health_reports_the_installed_version(client):
+    """A health endpoint that misreports its version cannot be used to verify a
+    deploy, which is exactly what a second hardcoded copy of the number caused."""
+    from importlib.metadata import version as distribution_version
+
+    body = client.get("/api/health").json()
+    assert body["version"] == distribution_version("reliefkit")
+    assert body["version"] != "0.0.0+unknown", "package metadata was not found"
+
+
 def test_health_works_even_when_every_source_is_down(client, monkeypatch):
     from reliefkit.sources import SourceError
 

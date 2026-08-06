@@ -1,5 +1,7 @@
 """reliefkit -- printable terrain models from public elevation data."""
 
+from importlib.metadata import PackageNotFoundError, version as _distribution_version
+
 from .dem import DEMGrid
 from .geo import BBox
 from .mesh import Solid, build_solid
@@ -20,7 +22,19 @@ from .tiling import (
     write_tiles_zip,
 )
 
-__version__ = "0.1.0"
+try:
+    __version__ = _distribution_version("reliefkit")
+except PackageNotFoundError:  # running from a source tree that was never installed
+    __version__ = "0.0.0+unknown"
+"""Version of the installed distribution.
+
+Read from package metadata rather than hardcoded here, so ``pyproject.toml`` is
+the only place a version number lives. A second copy in this file is exactly
+how ``/api/health`` came to report 0.1.0 from an image tagged 1.0.1 -- and a
+health endpoint that misreports its own version cannot be used to verify what
+is actually deployed. CI now refuses to publish a ``v*`` tag that disagrees
+with the version below.
+"""
 
 __all__ = [
     "BBox",
