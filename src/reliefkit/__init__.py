@@ -9,11 +9,22 @@ from .threemf import write_3mf
 from .settings import ReliefSettings
 from .sources import SOURCES, DEMSource, SourceError
 from .stl import write_ascii_stl, write_binary_stl
+from .tiling import (
+    BedSpec,
+    TileLayout,
+    TiledModel,
+    TilePiece,
+    build_tiled_model,
+    plan_layout,
+    write_tiles,
+    write_tiles_zip,
+)
 
 __version__ = "0.1.0"
 
 __all__ = [
     "BBox",
+    "BedSpec",
     "DEMGrid",
     "DEMSource",
     "ModelResult",
@@ -21,12 +32,19 @@ __all__ = [
     "SOURCES",
     "Solid",
     "SourceError",
+    "TileLayout",
+    "TiledModel",
+    "TilePiece",
     "build_model",
     "build_solid",
+    "build_tiled_model",
     "generate_stl",
     "mesh_from_grid",
+    "plan_layout",
     "write_model",
     "write_3mf",
+    "write_tiles",
+    "write_tiles_zip",
     "recommended_grid",
     "advise",
     "resolve_tool",

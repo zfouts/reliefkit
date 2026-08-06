@@ -104,6 +104,14 @@ builds the actual STL — the client copy only drives the preview.
 fine for one user and avoids dragging in a job queue. That's the first thing to
 change if this ever grows past a single self-hosted instance.
 
+The **Print bed** panel does the same tiling as `--bed`, and draws the cuts over
+both the map and the 3D preview so you can see where the model comes apart before
+committing. `/api/tile-plan` touches no elevation data at all — the split falls
+out of ground extent and scale — so the layout updates as you type. Exporting
+gives you a ZIP of every tile plus the manifest. Because each tile is its own
+upstream fetch inside that one synchronous request, the server caps a browser job
+at 64 tiles and tells you to use the CLI past that.
+
 Basemaps come from OpenTopoMap and Esri World Imagery — no API key, but both have
 usage policies aimed at low-volume use. Fine for a personal instance; point it at
 your own tile server if you're doing anything heavier.
@@ -144,6 +152,75 @@ reliefkit --bbox 6.8 45.8 7.0 45.95 -o mont-blanc.stl --true-scale 100000 --exag
 Real terrain is far wider than it is tall, so honest 1:1 vertical usually looks
 flat — 1.5×–3× is the normal range for a display piece.
 
+## Tiling for a print bed
+
+Give `--bed` your machine's usable build area and `--size` becomes the
+*assembled* object. reliefkit works out how many pieces that takes and writes
+one printable file per tile.
+
+```bash
+# 240 km of the North Cascades as a 1 m wall panel, cut for a 200 mm printer
+reliefkit --bbox -121.8 47.8 -120.4 48.9 -o cascades/ \
+  --size 1000 --relief 30 --square --bed 200 --for-tool fdm-0.4
+```
+
+```
+tool       : 0.4 mm -> 500 samples/tile (0.40 mm/sample)
+bed        : 200 x 200 mm
+tiles      : 5 x 5 = 25 tiles of 200.0 x 200.0 mm, assembling to 1000.0 x 1000.0 mm
+per tile   : 500x500 samples, 503,990 triangles, 0.40 mm/sample
+total      : 12,599,750 triangles, ~132 MB of 3mf
+```
+
+Add `--dry-run` to see that plan without fetching anything. The output directory
+gets `tile_r01c01.3mf` … `tile_r05c05.3mf` (row 01 is north, column 01 is west),
+plus a `manifest.json` and an `ASSEMBLY.txt` layout map. Point `-o` at a `.zip`
+to get one archive instead.
+
+| Flag | |
+|---|---|
+| `--bed X [Y]` | usable build area; one value for a square bed |
+| `--bed-margin MM` | clearance kept on **each** bed edge |
+| `--tiles COLS ROWS` | force a split instead of deriving one |
+| `--no-bed-rotate` | don't consider turning tiles 90° on the bed |
+| `--workers N` | parallel tile fetches (default 4) |
+
+`--grid` and `--for-tool` are read **per tile**, since a tile is what actually
+gets printed. On a non-square bed, reliefkit checks both orientations and takes
+whichever needs fewer prints — 1000 × 600 mm on a 200 × 250 mm bed is 5×3
+upright but 4×3 turned.
+
+### Why the seams line up
+
+Three rules, all in `tiling.py`:
+
+**One elevation datum for the whole region.** Heights are measured from the
+region's minimum and scaled by the region's range, so `--relief 30` spreads
+across the entire 240 km. Scaling each tile against its own local min/max — the
+obvious mistake — would step every seam by the difference between two local
+minima. Each tile ends up a *different* height; only the one holding the highest
+ground reaches the full relief.
+
+**Uniform in degrees, linear degrees to millimetres.** Tiles divide the box
+evenly in longitude and latitude, which is the same plate-carrée mapping the
+single-model path already applies, and it makes every tile exactly the same size
+in millimetres. Dividing by ground metres instead would make northern rows
+narrower than southern ones and the assembled sheet wouldn't be a rectangle.
+
+**A shared lattice, then reconciled seams.** Every tile is resampled to an
+identical sample count, so a tile's east edge column corresponds one-to-one with
+its neighbour's west edge column; those two lines are averaged and written back
+into both. This is not cosmetic. Elevation services return pixel-centred
+rasters, so a tile's edge column sits half a pixel *inside* the boundary it is
+supposed to land on, and its neighbour's sits half a pixel inside from the other
+direction. The two disagree by whatever the terrain does across one sample —
+under what the tool can reproduce, but a visible ridge along every seam if left
+alone.
+
+The result is that adjacent tiles share their edge vertices to the bit, so the
+pieces butt flat and glue without sanding. There's no joinery cut into the mesh;
+every tile is an ordinary watertight solid with a flat base.
+
 ## Library use
 
 ```python
@@ -162,6 +239,26 @@ for warning in result.warnings:
 
 `build_model()` returns the mesh without writing it; `mesh_from_grid()` skips
 the network entirely if you already hold a DEM.
+
+Tiling has the same shape. `plan_layout()` is offline — it needs only ground
+extent and scale — so you can size a job before committing to it:
+
+```python
+from reliefkit import BBox, BedSpec, ReliefSettings, build_tiled_model, plan_layout, write_tiles
+
+region = BBox(-121.8, 47.8, -120.4, 48.9).to_square()
+settings = ReliefSettings(target_size_mm=1000, relief_height_mm=30, max_grid=500)
+bed = BedSpec.square(200)
+
+print(plan_layout(region, settings, bed).describe())   # no network
+model = build_tiled_model(region, bed, settings)
+write_tiles(model, "cascades/", fmt="3mf")
+```
+
+`model.iter_tiles()` yields one meshed tile at a time rather than building them
+all up front — a 5×5 split at 500 samples is 50 MB of elevation but well over a
+gigabyte of geometry, so the writers mesh and emit each tile before starting the
+next.
 
 ## How the mesh is built
 
@@ -209,14 +306,19 @@ reliefkit --bbox -121.85 46.75 -121.65 46.90 -o rainier.3mf \
 ```
 
 ```
-tool   : 0.4 mm -> 500 samples (0.40 mm/sample)
-mesh   : 503,990 triangles, 251,997 vertices
-written: rainier.3mf (5.1 MB)
+tool       : 0.4 mm -> 500 samples (0.40 mm/sample)
+mesh       : 503,990 triangles, 251,997 vertices
+written    : rainier.3mf (5.1 MB)
 ```
 
 Presets: `fdm-0.4`, `fdm-0.6`, `fdm-0.8`, `resin`, `cnc-1mm`, `cnc-3mm`, `cnc-6mm`
 — or pass a diameter in mm. The web UI has the same control, and warns inline when
 the mesh is finer than the selected tool can reproduce.
+
+When tiling, every number above is **per tile** and multiplies by the tile count:
+that same 500-sample row is 5.1 MB one time on a single print, and 25 × 5.1 MB
+across a 5×5 wall panel. `--grid` therefore defaults to 500 with `--bed`
+(0.40 mm/sample on a 200 mm tile) rather than the 1200 a one-piece model gets.
 
 ## Output formats
 
@@ -242,6 +344,12 @@ pytest -m network          # also hits the live elevation services
 The offline suite stubs the elevation sources, so it needs no network and is
 deterministic. Geometry is checked by asserting exact closed-form volumes and by
 verifying every mesh edge is used by exactly two triangles.
+
+Tiling is checked against a *pixel-centred* fixture — one that samples half a
+cell inside the box it was handed, exactly as the real services do — so
+neighbouring tiles genuinely disagree along a shared edge before reconciliation.
+The tests then lay the built tiles out in model space and assert their seam
+vertices coincide to zero, both in memory and after a round trip through 3MF.
 
 ## Development
 

@@ -107,6 +107,59 @@
     </section>
 
     <section class="panel">
+      <h2>Print bed</h2>
+
+      <label class="check">
+        <input type="checkbox" id="tile-on">
+        <span>Split into tiles that fit my machine</span>
+      </label>
+      <p class="hint">
+        For a model bigger than one print. Neighbouring tiles share their edge
+        heights exactly, so they butt together flat — glue the seams.
+      </p>
+
+      <div id="tile-opts" hidden>
+        <div class="field-pair">
+          <div class="field">
+            <label for="bed-x">Bed width</label>
+            <div class="input-unit">
+              <input type="number" id="bed-x" value="200" min="10" max="2000" step="5">
+              <span class="unit">mm</span>
+            </div>
+          </div>
+          <div class="field">
+            <label for="bed-y">Bed depth</label>
+            <div class="input-unit">
+              <input type="number" id="bed-y" value="200" min="10" max="2000" step="5">
+              <span class="unit">mm</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="bed-margin">Edge clearance</label>
+          <div class="input-unit">
+            <input type="number" id="bed-margin" value="0" min="0" max="100" step="1">
+            <span class="unit">mm</span>
+          </div>
+          <p class="hint">Kept free on each side of the bed.</p>
+        </div>
+
+        <label class="check">
+          <input type="checkbox" id="bed-rotate" checked>
+          <span>Allow rotating tiles 90° on the bed</span>
+        </label>
+
+        <dl class="readout">
+          <div><dt>Split</dt><dd id="t-split">—</dd></div>
+          <div><dt>Tile size</dt><dd id="t-size">—</dd></div>
+          <div><dt>Per tile</dt><dd id="t-each">—</dd></div>
+        </dl>
+        <p class="hint" id="t-note"></p>
+      </div>
+    </section>
+
+    <section class="panel">
       <h2>Export</h2>
 
       <div class="field">
@@ -125,7 +178,7 @@
       </div>
 
       <div class="field">
-        <label for="grid">Mesh detail <output id="grid-out" class="tag">500 samples</output></label>
+        <label for="grid"><span id="grid-label">Mesh detail</span> <output id="grid-out" class="tag">500 samples</output></label>
         <input type="range" id="grid" value="500" min="40" max="2000" step="10">
         <p class="hint" id="grid-note"></p>
       </div>
@@ -139,10 +192,10 @@
       </div>
 
       <dl class="readout">
-        <div><dt>Model size</dt><dd id="e-size">—</dd></div>
+        <div><dt id="e-size-label">Model size</dt><dd id="e-size">—</dd></div>
         <div><dt>Scale</dt><dd id="e-scale">—</dd></div>
-        <div><dt>Triangles</dt><dd id="e-tris">—</dd></div>
-        <div><dt>File size</dt><dd id="e-bytes">—</dd></div>
+        <div><dt id="e-tris-label">Triangles</dt><dd id="e-tris">—</dd></div>
+        <div><dt id="e-bytes-label">File size</dt><dd id="e-bytes">—</dd></div>
       </dl>
       <div class="sticky-action">
         <button type="button" id="export" class="btn btn-primary" disabled>

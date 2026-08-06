@@ -13,9 +13,16 @@ const $ = (id) => document.getElementById(id);
 const state = {
   bbox: null,       // what the user drew
   preview: null,    // last /api/preview payload
+  tilePlan: null,   // last /api/tile-plan payload, null when not tiling
   view: 'map',
   pending: null,    // AbortController for an in-flight preview
+  tilePending: null,
 };
+
+function debounce(fn, ms) {
+  let timer;
+  return (...args) => { clearTimeout(timer); timer = setTimeout(() => fn(...args), ms); };
+}
 
 /* ── settings ────────────────────────────────────────────────── */
 
@@ -32,10 +39,16 @@ function readSettings() {
     square: $('square').checked,
     tool: $('tool').value === '' ? null : +$('tool').value,
     fmt: document.querySelector('[data-fmt].on').dataset.fmt,
+    tiling: $('tile-on').checked,
+    bedX: +$('bed-x').value,
+    bedY: +$('bed-y').value,
+    bedMargin: +$('bed-margin').value,
+    bedRotate: $('bed-rotate').checked,
   };
 }
 
-/** Longest horizontal dimension of the finished model, in mm. */
+/** Longest horizontal dimension of the finished model, in mm.
+ *  When tiling, this is the *assembled* object, not one piece of it. */
 function longestMm() {
   const s = readSettings();
   if (s.scaleMode === 'fit') return s.targetSize;
@@ -44,14 +57,25 @@ function longestMm() {
   return (Math.max(p.ground.width_m, p.ground.height_m) * 1000) / s.denom;
 }
 
+/** What the mesh-detail slider is counting samples across.
+ *
+ *  Tiling changes the answer: a tile is what actually gets printed, so it is
+ *  the tile the nozzle diameter has an opinion about, not the whole wall panel.
+ */
+function detailSpanMm() {
+  const p = state.tilePlan;
+  if (readSettings().tiling && p) return Math.max(p.tile_w_mm, p.tile_h_mm);
+  return longestMm();
+}
+
 /** Mesh detail follows the selected tool: one sample per tool width.
  *  Sampling finer than the nozzle or bit can reproduce only grows the file. */
 function syncGridToTool() {
   const s = readSettings();
-  const longest = longestMm();
-  if (!s.tool || !longest) return;
+  const span = detailSpanMm();
+  if (!s.tool || !span) return;
   const step = +$('grid').step || 50;
-  const raw = Math.ceil(longest / s.tool);
+  const raw = Math.ceil(span / s.tool);
   const snapped = Math.round(raw / step) * step;
   const g = Math.max(+$('grid').min, Math.min(+$('grid').max, snapped));
   $('grid').value = g;
@@ -60,11 +84,11 @@ function syncGridToTool() {
 
 function updateGridNote() {
   const s = readSettings();
-  const longest = longestMm();
+  const span = detailSpanMm();
   const el = $('grid-note');
-  if (!longest) { el.textContent = ''; el.classList.remove('over'); return; }
+  if (!span) { el.textContent = ''; el.classList.remove('over'); return; }
 
-  const mmPer = longest / s.grid;
+  const mmPer = span / s.grid;
   if (!s.tool) {
     el.textContent = `${mmPer.toFixed(2)} mm per sample.`;
     el.classList.remove('over');
@@ -86,17 +110,48 @@ function updateGridNote() {
   }
 }
 
+/** Triangles and bytes for a solid of the given sample counts. Mirrors
+ *  resolution.triangle_count plus the skirt and base fan. */
+function meshCost(rows, cols) {
+  const ring = 2 * rows + 2 * cols - 4;
+  const triangles = 2 * (rows - 1) * (cols - 1) + 3 * ring;
+  const bytes = 84 + 50 * triangles;
+  return { triangles, bytes, bytes_3mf: Math.round(bytes * 0.21) };
+}
+
+/** Sample counts for a grid budget spread over something of this aspect. */
+function sampleShape(grid, aspect) {
+  return aspect >= 1
+    ? { rows: Math.max(2, Math.round(grid / aspect)), cols: grid }
+    : { rows: grid, cols: Math.max(2, Math.round(grid * aspect)) };
+}
+
 function recomputeEstimate() {
   const p = state.preview;
   if (!p) return;
-  const aspect = p.ground.width_m / p.ground.height_m;
-  const g = +$('grid').value;
-  const cols = aspect >= 1 ? g : Math.max(2, Math.round(g * aspect));
-  const rows = aspect >= 1 ? Math.max(2, Math.round(g / aspect)) : g;
-  const ring = 2 * rows + 2 * cols - 4;
-  const tris = 2 * (rows - 1) * (cols - 1) + 3 * ring;
-  const stl = 84 + 50 * tris;
-  p.estimated = { triangles: tris, bytes: stl, bytes_3mf: Math.round(stl * 0.21) };
+  const { rows, cols } = sampleShape(+$('grid').value, p.ground.width_m / p.ground.height_m);
+  p.estimated = meshCost(rows, cols);
+}
+
+/** Mirrors TileLayout.estimate. The split itself does not depend on the grid,
+ *  so the plan fetched from the server stays valid while the slider moves --
+ *  only these numbers need recomputing. */
+function recomputeTileEstimate() {
+  const p = state.tilePlan;
+  if (!p) return;
+  const { rows, cols } = sampleShape(+$('grid').value, p.tile_w_mm / p.tile_h_mm);
+  const per = meshCost(rows, cols);
+  p.estimated = {
+    sample_rows: rows,
+    sample_cols: cols,
+    triangles_per_tile: per.triangles,
+    triangles_total: per.triangles * p.n_tiles,
+    bytes_per_tile: per.bytes,
+    bytes_per_tile_3mf: per.bytes_3mf,
+    bytes_total: per.bytes * p.n_tiles,
+    bytes_total_3mf: per.bytes_3mf * p.n_tiles,
+    mm_per_sample: p.tile_w_mm / cols,
+  };
 }
 
 /** Mirrors ReliefSettings.horizontal_mm_per_m / vertical_mm_per_m. */
@@ -222,6 +277,7 @@ function renderModel(heightsMm, rows, cols, sizeX, sizeY, base) {
   initThree();
   if (three.mesh) {
     three.mesh.geometry.dispose();
+    three.mesh.traverse((o) => o.isLine && o.geometry.dispose());
     three.scene.remove(three.mesh);
   }
   const geo = buildGeometry(heightsMm, rows, cols, sizeX / (cols - 1), sizeY / (rows - 1), base);
@@ -234,12 +290,68 @@ function renderModel(heightsMm, rows, cols, sizeX, sizeY, base) {
   const c = new THREE.Vector3();
   geo.boundingBox.getCenter(c);
   mesh.position.set(-c.x, -c.y, -c.z);
+
+  // Parented to the mesh so it inherits that recentring for free.
+  const plan = readSettings().tiling ? state.tilePlan : null;
+  if (plan) mesh.add(buildSeamLines(heightsMm, rows, cols, sizeX, sizeY, base, plan));
+
   three.scene.add(mesh);
   three.mesh = mesh;
 
   three.camera.up.set(0, 0, 1);
   resizeThree();        // settle the aspect before fitting to it
   frameModel(geo);
+}
+
+/** Cut lines draped over the terrain, so the split is visible in 3D.
+ *
+ * Sampled along the heightfield rather than drawn flat: a straight line across
+ * a mountain range would spend most of its length underground. Lifted a hair
+ * above the surface, since a polyline sharing vertices with a triangle mesh
+ * z-fights along its whole length.
+ */
+function buildSeamLines(heightsMm, rows, cols, sizeX, sizeY, base, plan) {
+  const dx = sizeX / (cols - 1);
+  const dy = sizeY / (rows - 1);
+
+  let peak = 0;
+  for (let i = 0; i < heightsMm.length; i++) if (heightsMm[i] > peak) peak = heightsMm[i];
+  const lift = Math.max(0.2, (base + peak) * 0.004);
+
+  // Bilinear so a cut that lands between samples still follows the surface.
+  const heightAt = (fr, fc) => {
+    const r0 = Math.min(rows - 1, Math.max(0, Math.floor(fr)));
+    const c0 = Math.min(cols - 1, Math.max(0, Math.floor(fc)));
+    const r1 = Math.min(rows - 1, r0 + 1);
+    const c1 = Math.min(cols - 1, c0 + 1);
+    const tr = fr - r0;
+    const tc = fc - c0;
+    const top = heightsMm[r0 * cols + c0] * (1 - tc) + heightsMm[r0 * cols + c1] * tc;
+    const bot = heightsMm[r1 * cols + c0] * (1 - tc) + heightsMm[r1 * cols + c1] * tc;
+    return top * (1 - tr) + bot * tr;
+  };
+
+  const points = [];
+  const polyline = (pts) => {
+    for (let i = 0; i + 1 < pts.length; i++) points.push(...pts[i], ...pts[i + 1]);
+  };
+
+  for (let i = 1; i < plan.cols; i++) {
+    const x = (sizeX * i) / plan.cols;
+    const fc = x / dx;
+    polyline(Array.from({ length: rows }, (_, r) =>
+      [x, (rows - 1 - r) * dy, heightAt(r, fc) + base + lift]));
+  }
+  for (let i = 1; i < plan.rows; i++) {
+    const y = sizeY - (sizeY * i) / plan.rows;   // row 0 is north, at max Y
+    const fr = (sizeY - y) / dy;
+    polyline(Array.from({ length: cols }, (_, c) =>
+      [c * dx, y, heightAt(fr, c) + base + lift]));
+  }
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(points), 3));
+  return new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ color: 0x0d5f57 }));
 }
 
 const VIEW_DIR = new THREE.Vector3(0.18, -1, 0.6).normalize();
@@ -328,8 +440,14 @@ function ensureBoxLayers() {
   map.addSource('sel', { type: 'geojson', data: emptyFC() });
   map.addLayer({ id: 'sel-fill', type: 'fill', source: 'sel', paint: { 'fill-color': '#0f6f66', 'fill-opacity': 0.16 } });
   map.addLayer({ id: 'sel-line', type: 'line', source: 'sel', paint: { 'line-color': '#0f6f66', 'line-width': 2 } });
+  // Added after the outline so the cuts draw over it.
+  map.addSource('cuts', { type: 'geojson', data: emptyFC() });
+  map.addLayer({
+    id: 'cuts-line', type: 'line', source: 'cuts',
+    paint: { 'line-color': '#0f6f66', 'line-width': 1.5, 'line-dasharray': [3, 2], 'line-opacity': 0.9 },
+  });
 }
-map.on('style.load', () => { ensureBoxLayers(); drawBox(state.bbox); });
+map.on('style.load', () => { ensureBoxLayers(); drawBox(state.bbox); drawCuts(state.tilePlan); });
 
 function drawBox(b) {
   if (!map.getSource('sel')) return;
@@ -343,6 +461,26 @@ function drawBox(b) {
       },
     }],
   } : emptyFC());
+}
+
+/** Where the tiles get cut, drawn over the selection.
+ *
+ * Each cut is a two-point segment at constant longitude or constant latitude,
+ * both of which are straight lines in Web Mercator, so no densifying is needed.
+ */
+function drawCuts(plan) {
+  if (!map.getSource('cuts')) return;
+  if (!plan) { map.getSource('cuts').setData(emptyFC()); return; }
+
+  const b = plan.bbox;
+  const line = (coords) => ({ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: coords } });
+  map.getSource('cuts').setData({
+    type: 'FeatureCollection',
+    features: [
+      ...plan.cut_lons.map((lon) => line([[lon, b.south], [lon, b.north]])),
+      ...plan.cut_lats.map((lat) => line([[b.west, lat], [b.east, lat]])),
+    ],
+  });
 }
 
 // cmd/ctrl + drag draws a region.
@@ -445,15 +583,15 @@ async function refreshPreview() {
     if (!res.ok) throw new Error(body.detail || `Request failed (${res.status})`);
 
     state.preview = body;
-    syncGridToTool();
-    recomputeEstimate();
     drawBox(body.bbox);                       // reflect the squared-off region
     $('tab-3d').disabled = false;
     $('tab-3d').title = '';
     $('export').disabled = false;
     $('three-empty').hidden = true;
     showBusy(false);
-    applyScale();
+    // Sizes the grid to the tool and re-renders; the tile plan has to land
+    // first, since when tiling it is a tile the tool is matched against.
+    await refreshTilePlan();
     setStatus(`${body.source} · ${body.rows}×${body.cols} preview`);
   } catch (err) {
     if (err.name === 'AbortError') return;
@@ -462,6 +600,86 @@ async function refreshPreview() {
   } finally {
     if (state.pending === controller) state.pending = null;
   }
+}
+
+/** Work out the tile split, then re-sync everything that depends on it.
+ *
+ * The endpoint touches no elevation data -- the split falls out of ground
+ * extent and scale alone -- so this is cheap enough to run while a slider moves.
+ */
+async function refreshTilePlan() {
+  const s = readSettings();
+  if (!s.tiling || !state.bbox) {
+    state.tilePlan = null;
+    drawCuts(null);
+    updateTileReadout();
+    syncGridToTool();
+    recomputeEstimate();
+    applyScale();
+    return;
+  }
+
+  state.tilePending?.abort();
+  const controller = new AbortController();
+  state.tilePending = controller;
+
+  try {
+    const res = await fetch('/api/tile-plan', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ...state.bbox, source: s.source, square: s.square, grid: s.grid,
+        scale_mode: s.scaleMode, target_size_mm: s.targetSize, relief_height_mm: s.relief,
+        base_thickness_mm: s.base, scale_denominator: s.denom, z_exaggeration: s.exag,
+        bed_x_mm: s.bedX, bed_y_mm: s.bedY, bed_margin_mm: s.bedMargin, bed_rotate: s.bedRotate,
+      }),
+      signal: controller.signal,
+    });
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.detail || `Could not plan the split (${res.status})`);
+
+    state.tilePlan = body;
+    drawCuts(body);
+    // Now that the tile size is known, the tool can be matched against it.
+    syncGridToTool();
+    recomputeTileEstimate();
+    recomputeEstimate();
+    updateTileReadout();
+    applyScale();
+  } catch (err) {
+    if (err.name === 'AbortError') return;
+    state.tilePlan = null;
+    drawCuts(null);
+    updateTileReadout(err.message);
+    applyScale();
+  } finally {
+    if (state.tilePending === controller) state.tilePending = null;
+  }
+}
+
+function updateTileReadout(error) {
+  const p = state.tilePlan;
+  const note = $('t-note');
+
+  if (!p) {
+    for (const id of ['t-split', 't-size', 't-each']) $(id).textContent = '—';
+    note.textContent = error || '';
+    note.classList.toggle('over', Boolean(error));
+    return;
+  }
+
+  // Per-tile file size, not triangles: what matters when you are about to open
+  // two dozen of these in a slicer. The total triangle count is in Export.
+  const e = p.estimated;
+  const each = readSettings().fmt === '3mf' ? e.bytes_per_tile_3mf : e.bytes_per_tile;
+  $('t-split').textContent = `${p.cols} × ${p.rows} = ${p.n_tiles} tile${p.n_tiles === 1 ? '' : 's'}`;
+  $('t-size').textContent = `${p.tile_w_mm.toFixed(1)} × ${p.tile_h_mm.toFixed(1)} mm`;
+  $('t-each').textContent = `${e.sample_cols}×${e.sample_rows} · ${(each / 1e6).toFixed(1)} MB`;
+
+  const messages = [...p.warnings];
+  if (p.rotated_on_bed) messages.push('Tiles are rotated 90° on the bed to fit.');
+  note.textContent = messages.join(' ');
+  note.classList.toggle('over', !p.exportable);
 }
 
 /** Re-scale and re-render from the cached elevation grid. No network. */
@@ -491,10 +709,27 @@ function applyScale() {
 
   $('e-size').textContent = `${sizeX.toFixed(1)} × ${sizeY.toFixed(1)} × ${sizeZ.toFixed(1)} mm`;
   $('e-scale').textContent = `1:${Math.round(1000 / xy).toLocaleString()} · ${(z / xy).toFixed(2)}× vert`;
-  $('e-tris').textContent = p.estimated.triangles.toLocaleString();
-  const bytes = s.fmt === '3mf' ? p.estimated.bytes_3mf : p.estimated.bytes;
+
+  // Tiling does not change the finished object, only how many pieces it arrives
+  // in -- so the size readout stands and the mesh totals are what shift.
+  const plan = s.tiling ? state.tilePlan : null;
+  const tris = plan ? plan.estimated.triangles_total : p.estimated.triangles;
+  const bytes = plan
+    ? (s.fmt === '3mf' ? plan.estimated.bytes_total_3mf : plan.estimated.bytes_total)
+    : (s.fmt === '3mf' ? p.estimated.bytes_3mf : p.estimated.bytes);
+
+  $('e-size-label').textContent = plan ? 'Assembled size' : 'Model size';
+  $('e-tris-label').textContent = plan ? 'Triangles, all tiles' : 'Triangles';
+  $('e-bytes-label').textContent = plan ? 'ZIP size' : 'File size';
+  $('grid-label').textContent = s.tiling ? 'Mesh detail per tile' : 'Mesh detail';
+  $('e-tris').textContent = tris.toLocaleString();
   $('e-bytes').textContent = `${(bytes / 1e6).toFixed(1)} MB${s.fmt === '3mf' ? ' (approx)' : ''}`;
-  $('export').querySelector('.btn-label').textContent = `Export ${s.fmt.toUpperCase()}`;
+
+  $('export').querySelector('.btn-label').textContent = plan
+    ? `Export ${plan.n_tiles} tiles (ZIP)`
+    : `Export ${s.fmt.toUpperCase()}`;
+  $('export').disabled = Boolean(s.tiling && !plan?.exportable);
+
   updateGridNote();
   $('attribution').textContent = p.attribution;
 
@@ -525,38 +760,55 @@ function renderWarnings(list) {
 async function doExport() {
   const btn = $('export');
   const s = readSettings();
+  const plan = s.tiling ? state.tilePlan : null;
+
   btn.classList.add('working');
   btn.disabled = true;
   btn.querySelector('.btn-label').textContent = 'Building…';
-  setStatus('Building mesh — this can take a while at high detail.');
+  setStatus(plan
+    // One upstream fetch and one mesh per tile, all inside this one request.
+    ? `Building ${plan.n_tiles} tiles — this takes a while; the download starts when they are all done.`
+    : 'Building mesh — this can take a while at high detail.');
+
+  const body = {
+    ...state.bbox, source: s.source, square: s.square, grid: s.grid, fmt: s.fmt,
+    scale_mode: s.scaleMode, target_size_mm: s.targetSize, relief_height_mm: s.relief,
+    base_thickness_mm: s.base, scale_denominator: s.denom, z_exaggeration: s.exag,
+  };
+  if (plan) {
+    Object.assign(body, {
+      bed_x_mm: s.bedX, bed_y_mm: s.bedY, bed_margin_mm: s.bedMargin, bed_rotate: s.bedRotate,
+    });
+  }
 
   try {
-    const res = await fetch('/api/export', {
+    const res = await fetch(plan ? '/api/export-tiles' : '/api/export', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        ...state.bbox, source: s.source, square: s.square, grid: s.grid, fmt: s.fmt,
-        scale_mode: s.scaleMode, target_size_mm: s.targetSize, relief_height_mm: s.relief,
-        base_thickness_mm: s.base, scale_denominator: s.denom, z_exaggeration: s.exag,
-      }),
+      body: JSON.stringify(body),
     });
     if (!res.ok) {
-      const body = await res.json().catch(() => ({}));
-      throw new Error(body.detail || `Export failed (${res.status})`);
+      const detail = await res.json().catch(() => ({}));
+      throw new Error(detail.detail || `Export failed (${res.status})`);
     }
     const blob = await res.blob();
-    const name = res.headers.get('Content-Disposition')?.match(/filename="(.+?)"/)?.[1] || 'reliefkit.stl';
+    const fallback = plan ? 'reliefkit_tiles.zip' : 'reliefkit.stl';
+    const name = res.headers.get('Content-Disposition')?.match(/filename="(.+?)"/)?.[1] || fallback;
     const url = URL.createObjectURL(blob);
     Object.assign(document.createElement('a'), { href: url, download: name }).click();
     URL.revokeObjectURL(url);
-    setStatus(`Exported ${name} · ${(+res.headers.get('X-Triangle-Count')).toLocaleString()} triangles`);
+
+    const tris = (+res.headers.get('X-Triangle-Count')).toLocaleString();
+    setStatus(plan
+      ? `Exported ${name} · ${plan.n_tiles} tiles, ${tris} triangles`
+      : `Exported ${name} · ${tris} triangles`);
   } catch (err) {
     showError(err.message);
     setStatus('');
   } finally {
     btn.classList.remove('working');
     btn.disabled = false;
-    btn.querySelector('.btn-label').textContent = `Export ${readSettings().fmt.toUpperCase()}`;
+    applyScale();     // restores the button label and its enabled state
   }
 }
 
@@ -593,6 +845,8 @@ for (const btn of document.querySelectorAll('[data-base]')) {
   });
 }
 
+const replanTiles = debounce(refreshTilePlan, 150);
+
 for (const btn of document.querySelectorAll('[data-mode]')) {
   btn.addEventListener('click', () => {
     document.querySelectorAll('[data-mode]').forEach((b) => {
@@ -605,6 +859,7 @@ for (const btn of document.querySelectorAll('[data-mode]')) {
     syncGridToTool();
     recomputeEstimate();
     applyScale();
+    replanTiles();               // a different scale mode is a different split
   });
 }
 
@@ -614,12 +869,16 @@ for (const id of ['size', 'relief', 'denom', 'exag', 'base']) {
     if (id === 'relief') $('relief-out').textContent = `${$('relief').value} mm`;
     if (id === 'exag') $('exag-out').textContent = `${(+$('exag').value).toFixed(1)}×`;
     applyScale();
+    // Only the horizontal scale moves the cuts; relief and base are Z-only.
+    if (id === 'size' || id === 'denom') replanTiles();
   });
 }
 $('grid').addEventListener('input', () => {
   $('grid-out').textContent = `${$('grid').value} samples`;
   $('tool').value = '';            // hand-set detail means the tool no longer drives it
   recomputeEstimate();
+  recomputeTileEstimate();
+  updateTileReadout();
   applyScale();
   updateGridNote();
 });
@@ -627,8 +886,19 @@ $('grid').addEventListener('input', () => {
 $('tool').addEventListener('change', () => {
   syncGridToTool();
   recomputeEstimate();
+  recomputeTileEstimate();
+  updateTileReadout();
   applyScale();
 });
+
+/* ── tiling ──────────────────────────────────────────────────── */
+
+$('tile-on').addEventListener('change', () => {
+  $('tile-opts').hidden = !$('tile-on').checked;
+  refreshTilePlan();
+});
+for (const id of ['bed-x', 'bed-y', 'bed-margin']) $(id).addEventListener('input', replanTiles);
+$('bed-rotate').addEventListener('change', refreshTilePlan);
 
 for (const btn of document.querySelectorAll('[data-fmt]')) {
   btn.addEventListener('click', () => {
@@ -636,6 +906,7 @@ for (const btn of document.querySelectorAll('[data-fmt]')) {
       b.classList.toggle('on', b === btn);
       b.setAttribute('aria-checked', String(b === btn));
     });
+    updateTileReadout();     // the per-tile size readout is format-dependent
     applyScale();
   });
 }
@@ -644,7 +915,10 @@ for (const id of ['source', 'square']) $(id).addEventListener('change', refreshP
 $('clear').addEventListener('click', () => {
   state.bbox = null;
   state.preview = null;
+  state.tilePlan = null;
   drawBox(null);
+  drawCuts(null);
+  updateTileReadout();
   $('clear').disabled = true;
   $('export').disabled = true;
   $('tab-3d').disabled = true;

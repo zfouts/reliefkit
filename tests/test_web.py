@@ -6,7 +6,10 @@ and deterministic.
 
 from __future__ import annotations
 
+import io
+import json
 import struct
+import zipfile
 
 import numpy as np
 import pytest
@@ -41,7 +44,7 @@ def client(monkeypatch):
     stub = StubSource()
     monkeypatch.setitem(web_app.SOURCES, "stub", stub)
     monkeypatch.setattr(web_app, "choose_source", lambda bbox: stub, raising=False)
-    for module in ("reliefkit.sources", "reliefkit.pipeline"):
+    for module in ("reliefkit.sources", "reliefkit.pipeline", "reliefkit.tiling"):
         monkeypatch.setattr(f"{module}.choose_source", lambda bbox: stub, raising=False)
     return TestClient(web_app.app)
 
@@ -229,3 +232,128 @@ def test_preview_estimates_both_formats(client):
 def test_unknown_format_is_rejected(client):
     res = client.post("/api/export", json={**RAINIER, "source": "stub", "fmt": "obj"})
     assert res.status_code == 422
+
+
+# --- tiling -------------------------------------------------------------
+
+BIG = {**RAINIER, "source": "stub", "square": True, "target_size_mm": 1000, "grid": 60}
+BED_200 = {"bed_x_mm": 200, "bed_y_mm": 200}
+
+
+def test_tile_plan_splits_to_fit_the_bed(client):
+    body = client.post("/api/tile-plan", json={**BIG, **BED_200}).json()
+    assert (body["cols"], body["rows"], body["n_tiles"]) == (5, 5, 25)
+    assert body["tile_w_mm"] == pytest.approx(200.0)
+    assert body["fits_bed"] and body["exportable"]
+
+
+def test_tile_plan_never_touches_a_source(client, monkeypatch):
+    """The split falls out of ground extent and scale alone, so the sidebar can
+    recompute it on every keystroke without hammering a public service."""
+    broken = StubSource()
+    broken.fetch = lambda bbox, n: pytest.fail("tile-plan must not fetch elevation")
+    monkeypatch.setitem(web_app.SOURCES, "stub", broken)
+    assert client.post("/api/tile-plan", json={**BIG, **BED_200}).status_code == 200
+
+
+def test_tile_plan_returns_interior_cuts_only(client):
+    body = client.post("/api/tile-plan", json={**BIG, **BED_200}).json()
+    box = body["bbox"]
+    assert len(body["cut_lons"]) == body["cols"] - 1
+    assert len(body["cut_lats"]) == body["rows"] - 1
+    assert all(box["west"] < lon < box["east"] for lon in body["cut_lons"])
+    assert all(box["south"] < lat < box["north"] for lat in body["cut_lats"])
+
+
+def test_tile_plan_estimates_the_whole_job(client):
+    body = client.post("/api/tile-plan", json={**BIG, **BED_200}).json()
+    est = body["estimated"]
+    assert est["triangles_total"] == est["triangles_per_tile"] * 25
+    assert est["bytes_total_3mf"] < est["bytes_total"]
+
+
+def test_tile_plan_warns_rather_than_failing_past_the_web_cap(client):
+    body = client.post("/api/tile-plan", json={**BIG, "bed_x_mm": 60, "bed_y_mm": 60}).json()
+    assert body["n_tiles"] > web_app.MAX_WEB_TILES
+    assert body["exportable"] is False
+    assert any("CLI" in w for w in body["warnings"])
+
+
+def test_tile_plan_flags_a_forced_split_that_does_not_fit(client):
+    body = client.post("/api/tile-plan", json={**BIG, **BED_200, "tile_cols": 2, "tile_rows": 2}).json()
+    assert (body["cols"], body["rows"]) == (2, 2)
+    assert body["fits_bed"] is False
+    assert any("does not fit" in w for w in body["warnings"])
+
+
+def test_tile_plan_rejects_an_absurd_split(client):
+    res = client.post("/api/tile-plan", json={**BIG, "target_size_mm": 2000, "bed_x_mm": 50, "bed_y_mm": 50})
+    assert res.status_code == 422
+
+
+def test_export_tiles_returns_a_zip_with_a_manifest(client):
+    res = client.post("/api/export-tiles", json={**BIG, "grid": 40, "fmt": "3mf", **BED_200})
+    assert res.status_code == 200
+    assert res.headers["content-type"] == "application/zip"
+    assert res.headers["content-disposition"].endswith('.zip"')
+    assert res.headers["X-Tile-Count"] == "25"
+    assert res.headers["X-Attribution"]
+
+    with zipfile.ZipFile(io.BytesIO(res.content)) as zf:
+        names = zf.namelist()
+        assert len([n for n in names if n.endswith(".3mf")]) == 25
+        assert {"manifest.json", "ASSEMBLY.txt"} <= set(names)
+        manifest = json.loads(zf.read("manifest.json"))
+        assert manifest["assembled_mm"]["x"] == pytest.approx(1000.0)
+        assert len(manifest["tiles"]) == 25
+
+
+def test_exported_tiles_share_their_seam_vertices(client):
+    """The whole point: the pieces have to butt together."""
+    res = client.post("/api/export-tiles", json={**BIG, "grid": 40, "fmt": "3mf", **BED_200})
+    with zipfile.ZipFile(io.BytesIO(res.content)) as zf:
+        manifest = json.loads(zf.read("manifest.json"))
+        tile_w = manifest["layout"]["tile_w_mm"]
+
+        def top(name):
+            with zf.open(name) as fh:
+                verts, _ = read_3mf(io.BytesIO(fh.read()))
+            # build_solid lays out s*s top vertices, then a (4s-4) skirt ring,
+            # then one centre point -- so V = s^2 + 4s - 3 for a square tile.
+            side = int(round((len(verts) + 7) ** 0.5)) - 2
+            assert side * side + 4 * side - 3 == len(verts)
+            return verts[: side * side].reshape(side, side, 3)
+
+        west, east = top("tile_r01c01.3mf"), top("tile_r01c02.3mf")
+
+    shifted = west[:, -1].copy()
+    shifted[:, 0] -= tile_w
+    np.testing.assert_allclose(shifted, east[:, 0], atol=1e-9)
+
+
+def test_export_tiles_refuses_a_job_past_the_cap(client):
+    res = client.post("/api/export-tiles", json={**BIG, "bed_x_mm": 60, "bed_y_mm": 60})
+    assert res.status_code == 422
+    assert "CLI" in res.json()["detail"]
+
+
+def test_export_tiles_refuses_a_tile_that_will_not_fit(client):
+    res = client.post("/api/export-tiles", json={**BIG, **BED_200, "tile_cols": 2, "tile_rows": 2})
+    assert res.status_code == 422
+    assert "does not fit" in res.json()["detail"]
+
+
+def test_export_tiles_needs_a_bed(client):
+    assert client.post("/api/export-tiles", json=BIG).status_code == 422
+
+
+def test_tiled_upstream_failure_maps_to_502(client, monkeypatch):
+    from reliefkit.sources import SourceError
+
+    broken = StubSource()
+    broken.fetch = lambda bbox, n: (_ for _ in ()).throw(SourceError("elevation service unavailable"))
+    monkeypatch.setitem(web_app.SOURCES, "stub", broken)
+
+    res = client.post("/api/export-tiles", json={**BIG, "grid": 40, **BED_200})
+    assert res.status_code == 502
+    assert "unavailable" in res.json()["detail"]

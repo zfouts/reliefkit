@@ -10,9 +10,22 @@ Two endpoints do the real work:
 ``POST /api/export``
     Builds the model at full resolution and streams back a binary STL.
 
+``POST /api/tile-plan``
+    Works out how a too-large model splits across a print bed. Touches no
+    network at all -- the split follows from ground extent and scale alone --
+    so the sidebar can recompute it on every keystroke.
+
+``POST /api/export-tiles``
+    Builds every tile and returns them as one ZIP.
+
 Export is synchronous. A 1200-sample grid takes on the order of ten seconds,
 which is tolerable for a single-user self-hosted tool and avoids dragging in a
 job queue. If this ever grows past one user, that is the first thing to change.
+
+Tiling makes that worse in proportion to the tile count -- each tile is its own
+upstream fetch -- which is why ``MAX_WEB_TILES`` is well below the library's
+own ceiling. Past that, the CLI is the right tool: it streams progress and no
+proxy is waiting on it.
 """
 
 from __future__ import annotations
@@ -34,6 +47,7 @@ from ..pipeline import build_model
 from ..settings import ReliefSettings
 from ..sources import SOURCES, SourceError
 from ..stl import estimated_binary_size, write_binary_stl
+from ..tiling import BedSpec, TileLayout, build_tiled_model, plan_layout, write_tiles_zip
 
 STATIC = Path(__file__).parent / "static"
 
@@ -41,6 +55,10 @@ STATIC = Path(__file__).parent / "static"
 # to serialise as JSON and re-render on every settings tweak.
 PREVIEW_GRID = 160
 MAX_EXPORT_GRID = 2000
+
+# One HTTP request has to survive one fetch per tile plus meshing all of them.
+# Sixty-four is roughly where that stops being reasonable to hold a browser on.
+MAX_WEB_TILES = 64
 
 app = FastAPI(title="reliefkit", docs_url="/api/docs", redoc_url=None)
 
@@ -97,6 +115,45 @@ class ModelRequest(BaseModel):
             )
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
+
+
+class TileRequest(ModelRequest):
+    """A model request plus the machine it has to be cut up for.
+
+    ``grid`` is inherited but means something different here: samples across a
+    single *tile*, not across the whole region. A tile is what actually gets
+    printed, so it is what the nozzle diameter has an opinion about.
+    """
+
+    bed_x_mm: float = Field(gt=0, le=2000)
+    bed_y_mm: float = Field(gt=0, le=2000)
+    bed_margin_mm: float = Field(default=0.0, ge=0, le=200)
+    bed_rotate: bool = True
+
+    # Both or neither; an explicit split overrides the one derived from the bed.
+    tile_cols: int | None = Field(default=None, ge=1, le=MAX_WEB_TILES)
+    tile_rows: int | None = Field(default=None, ge=1, le=MAX_WEB_TILES)
+
+    def to_bed(self) -> BedSpec:
+        try:
+            return BedSpec(self.bed_x_mm, self.bed_y_mm, self.bed_margin_mm, allow_rotation=self.bed_rotate)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    def forced_split(self) -> tuple[int, int] | None:
+        if self.tile_cols and self.tile_rows:
+            return self.tile_cols, self.tile_rows
+        return None
+
+    def to_layout(self) -> tuple[BBox, TileLayout]:
+        bbox = self.to_bbox()
+        if self.square:
+            bbox = bbox.to_square()
+        try:
+            layout = plan_layout(bbox, self.to_settings(self.grid), self.to_bed(), tiles=self.forced_split())
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        return bbox, layout
 
 
 def _build(req: ModelRequest, grid: int):
@@ -210,6 +267,101 @@ def export(req: ModelRequest) -> Response:
             "Content-Disposition": f'attachment; filename="{_filename(result, req.fmt)}"',
             "X-Triangle-Count": str(result.solid.n_faces),
             "X-Attribution": result.attribution,
+        },
+    )
+
+
+@app.post("/api/tile-plan")
+def tile_plan(req: TileRequest) -> dict:
+    """How the model splits across the bed, plus where the cuts land on the map.
+
+    Deliberately offline. The split follows from the region's ground extent and
+    the scale settings, neither of which needs elevation data, so this answers
+    instantly and can be recomputed on every keystroke without touching a public
+    elevation service.
+    """
+    bbox, layout = req.to_layout()
+
+    # Interior cut lines only -- the region's own edges are not seams.
+    lon_span, lat_span = bbox.east - bbox.west, bbox.north - bbox.south
+    cut_lons = [bbox.west + lon_span * i / layout.cols for i in range(1, layout.cols)]
+    cut_lats = [bbox.north - lat_span * i / layout.rows for i in range(1, layout.rows)]
+
+    warnings = []
+    if not layout.fits_bed:
+        warnings.append(
+            f"A {layout.tile_w_mm:.0f} × {layout.tile_h_mm:.0f} mm tile does not fit this bed."
+        )
+    if layout.n_tiles > MAX_WEB_TILES:
+        warnings.append(
+            f"{layout.n_tiles} tiles is more than this server will build in one request "
+            f"(limit {MAX_WEB_TILES}). Use the reliefkit CLI for a job this size."
+        )
+
+    return {
+        "cols": layout.cols,
+        "rows": layout.rows,
+        "n_tiles": layout.n_tiles,
+        "tile_w_mm": round(layout.tile_w_mm, 2),
+        "tile_h_mm": round(layout.tile_h_mm, 2),
+        "total_w_mm": round(layout.total_w_mm, 2),
+        "total_h_mm": round(layout.total_h_mm, 2),
+        "rotated_on_bed": layout.rotated_on_bed,
+        "fits_bed": layout.fits_bed,
+        "exportable": layout.n_tiles <= MAX_WEB_TILES and layout.fits_bed,
+        "max_tiles": MAX_WEB_TILES,
+        "bbox": dict(zip(("west", "south", "east", "north"), bbox.as_tuple())),
+        "cut_lons": cut_lons,
+        "cut_lats": cut_lats,
+        "estimated": layout.estimate(req.grid),
+        "warnings": warnings,
+    }
+
+
+@app.post("/api/export-tiles")
+def export_tiles(req: TileRequest) -> Response:
+    """Build every tile and return them as one ZIP, with a manifest inside."""
+    bbox, layout = req.to_layout()
+    if layout.n_tiles > MAX_WEB_TILES:
+        raise HTTPException(
+            422,
+            f"{layout.n_tiles} tiles exceeds this server's limit of {MAX_WEB_TILES}; "
+            "use the reliefkit CLI for a job this size",
+        )
+    if not layout.fits_bed:
+        raise HTTPException(
+            422, f"a {layout.tile_w_mm:.0f} x {layout.tile_h_mm:.0f} mm tile does not fit the given bed"
+        )
+
+    try:
+        model = build_tiled_model(
+            bbox,
+            req.to_bed(),
+            settings=req.to_settings(req.grid),
+            source=req.source,
+            square=False,  # to_layout already squared it, if asked
+            tiles=req.forced_split(),
+        )
+    except SourceError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+    buffer = io.BytesIO()
+    write_tiles_zip(model, buffer, fmt=req.fmt)
+
+    w, s, _, _ = bbox.as_tuple()
+    stem = f"reliefkit_tiles_{s:.3f}_{w:.3f}".replace("-", "m").replace(".", "p")
+    name = re.sub(r"[^A-Za-z0-9_]", "", stem) + ".zip"
+
+    return Response(
+        content=buffer.getvalue(),
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{name}"',
+            "X-Tile-Count": str(layout.n_tiles),
+            "X-Triangle-Count": str(model.n_triangles),
+            "X-Attribution": model.attribution,
         },
     )
 

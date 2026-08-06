@@ -45,7 +45,7 @@ class DEMGrid:
         return self.max_elevation - self.min_elevation
 
     def resample(self, max_dim: int) -> DEMGrid:
-        """Decimate so neither dimension exceeds ``max_dim``.
+        """Decimate so neither dimension exceeds ``max_dim``, preserving aspect.
 
         Uses index striding via linear interpolation on each axis, which is
         adequate here because the mesh is a low-pass artefact anyway -- a 3D
@@ -55,15 +55,35 @@ class DEMGrid:
         if max(rows, cols) <= max_dim:
             return self
         scale = max_dim / max(rows, cols)
-        new_rows = max(2, int(round(rows * scale)))
-        new_cols = max(2, int(round(cols * scale)))
+        return self.resample_to(max(2, int(round(rows * scale))), max(2, int(round(cols * scale))))
 
-        row_idx = np.linspace(0, rows - 1, new_rows)
-        col_idx = np.linspace(0, cols - 1, new_cols)
+    def resample_to(self, rows: int, cols: int) -> DEMGrid:
+        """Resize to exactly ``rows`` x ``cols`` samples, up or down.
+
+        :meth:`resample` only ever decimates, and derives the result shape from
+        the grid's own aspect. Tiling needs the opposite guarantee: every tile
+        on an *identical* lattice, whatever each fetch happened to return, so
+        that neighbouring tiles share their common edge sample for sample.
+        """
+        if rows < 2 or cols < 2:
+            raise ValueError(f"resample_to needs at least 2x2, got {rows}x{cols}")
+        if self.shape == (rows, cols):
+            return self
+        row_idx = np.linspace(0, self.shape[0] - 1, rows)
+        col_idx = np.linspace(0, self.shape[1] - 1, cols)
         # Separable linear interpolation: rows first, then columns.
         tmp = _interp_axis(self.elevations, row_idx, axis=0)
         out = _interp_axis(tmp, col_idx, axis=1)
-        return DEMGrid(out, self.bbox, self.source, self.nodata_filled)
+
+        # ``nodata_filled`` is only ever read as a fraction of the grid it
+        # belongs to, so it has to scale with the grid. Carrying the raw count
+        # across a resize would report a filled fraction over 100% whenever a
+        # source hands back more pixels than were asked for -- which Copernicus
+        # does routinely, since it clamps at its native 1 arc-second spacing.
+        filled = self.nodata_filled
+        if filled:
+            filled = min(rows * cols, round(filled * (rows * cols) / self.elevations.size))
+        return DEMGrid(out, self.bbox, self.source, filled)
 
     def describe(self) -> str:
         rows, cols = self.shape
