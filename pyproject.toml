@@ -7,7 +7,7 @@ name = "reliefkit"
 # The single source of truth for the version. `reliefkit.__version__` reads it
 # back from installed metadata, and CI refuses to publish a `v*` tag that does
 # not match it -- so /api/health always reports what is actually deployed.
-version = "1.0.1"
+version = "1.0.2"
 description = "Printable terrain models from public-domain elevation data"
 readme = "README.md"
 license = { text = "MIT" }
